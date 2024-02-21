@@ -1,134 +1,130 @@
 # bot.py
-import re
-import os
+import telegram as tg
+from telegram.ext import Updater
 import logging
+import json
+import urllib.parse
+from telegram.ext import CommandHandler
+from telegram.ext import MessageHandler, Filters
+from telegram import MessageEntity
+from aliexpress_api import AliexpressApi, models
+import re
 import requests
-from telegram import Update, MessageEntity
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import os
+
+PORT = int(os.environ.get('PORT', 5000))
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 
-# Set the loglevel of the telegram module to warning
-logger = logging.getLogger("Affiliate_telegram_bot")
-logging.getLogger('telegram').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
-
-# Read env variables
+logger = logging.getLogger(__name__)
+#Read env variables
 TOKEN = os.environ['TOKEN']
-DEV_CHAT_ID = os.environ['DEV_CHAT_ID'] if 'DEV_CHAT_ID' in os.environ else None
-search_url = os.environ['search_url'] 
+baseURL = os.environ['baseURL'] 
 affiliate_tag = os.environ['affiliate_tag']
+HEROKU_URL = os.environ['HEROKU_URL']
+ALITOKEN = os.environ['ALITOKEN']
+SECRET = os.environ['SECRET']
+TRACKING_ID = os.environ['TRACKING_ID']
+aliexpress = AliexpressApi(ALITOKEN, SECRET, models.Language.EN, models.Currency.EUR, TRACKING_ID)
 
-# Filtered URL schemes: dp/ASIN, gp/product/ASIN and gp/aw/d/ASIN
-PRODUCT_PATTERN_CODE = re.compile(r'(?:dp\/[\w]*)|(?:gp\/product\/[\w]*)|(?:gp\/aw\/d\/[\w]*)')
+# baseURL should have https and www before amazon, but we also want to detect URL without it
+# Ensure that we can detect all but the baseURL has the correct https URL
+if baseURL.startswith("https://www."):
+    searchURL = baseURL[12:]
+elif baseURL.startswith("http://www."):
+    searchURL = baseURL[11:]
+    baseURL = "https://www."+searchURL
+else:
+    searchURL = baseURL
+    baseURL = "https://www."+baseURL
 
-# Handle the search_url and ensure that it's correct
-if (not search_url.startswith("amazon.")):
-    logger.error("Incorrect search URL. The URL must start with 'amazon.' followed by the country domain.")
-if (not search_url.endswith("/")):
-    search_url = search_url + "/"
-base_url = "https://www."+search_url
+# Define a few command handlers. These usually take the two arguments update and
+# context. Error handlers also receive the raised TelegramError object in error.
+def start(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Hola! Este bot responde a los enlaces de amazon y aliexpress añadiendo un codigo de afiliado!")
 
-logger.info(f'Telegram bot started correctly with the affiliate_tag: {affiliate_tag}')
+# Create the new URL with the refer tag
+def newReferURL(pcode):
+    return baseURL+pcode+"?tag="+affiliate_tag
 
+#Expand shorted URL (amzn.to links) to normal Amazon URL
+def unshortURL(url):
+    resp = requests.get("https://"+url)
+    return resp.url
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Command handler for the command start. Reply with a greeting when initializing the bot.
-    
-    Args:
-        update: The incoming update.
-        context: The context of the bot.
-    """
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Hola! Este bot responde a los enlaces de amazon añadiendo un codigo de afiliado!")
-
-def create_affiliate_url(product_code: str) -> str:
-    """Create a new URL with the the product code and the affiliate tag.
-
-    Args:
-        product_code: The product code that will be used to create the URL.
-    
-    Returns:
-        The new URL with the product code and the affiliate tag.
-    """
-    return base_url+product_code+"?tag="+affiliate_tag
-
-def expand_short_url(url: str) -> str:
-    """
-    Expand shortened URLs to the common Amazon URLs.
-
-    Args:
-        url: The shortened URL.
-    
-    Returns:
-        The expanded URL or empty string if the process fails. 
-    """
-    try:
-        response = requests.get("https://"+url)
-        return response.url
-    except requests.exceptions.RequestException:
-        logger.error(f"Failed to expand URL: {url}")
-        return ""  
-
-async def filterText(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Filter the incoming message text to extract the amazon URL if found. 
-       Then send the corresponding reply with the new URL with the affiliate tag.
-
-    Args:
-        update: The incoming update.
-        context: The context of the bot.
-    """
+#Filter the msg text to extract the URL if found. Then send the corresponding reply
+# with the new affiliate URL
+def filterText(update, context):
     pCode=""
     msg = update.message.text
-
-    # Search for a shortened URL and expand it.
-    short_url_list = ["amzn.to", "amzn.eu"]
-    for url in short_url_list:
-        short_start_index = msg.find(url)
-        if short_start_index!=-1:
-            msg = expand_short_url(msg[short_start_index:].split()[0])
-            break
-    
-    # Search for the affiliate tag, send the same URL if found.
-    if (msg.find(affiliate_tag)!=-1):
-        logger.info(f"The affiliate tag was already in the URL: {msg}")
-        await context.bot.sendMessage(chat_id=update.message.chat_id, reply_to_message_id=update.effective_message.id, text=msg)
-        return
-    
-    # Search the start of the amazon base url
-    start_index = msg.find(search_url)
-    if start_index != -1:
-        # Regular expression to extract the product code. Adjust if different URL schemes are found.
-        m = re.search(PRODUCT_PATTERN_CODE,msg[start_index:].split(" ")[0]) 
-        pCode = m.group(0) if m != None else ""
-
-        # Create and send the new url with the affiliate tag
-        new_url = create_affiliate_url(pCode)
+    sender = "<a href=\"tg://user?id="+str(update.message.from_user.id)+"\">"+update.message.from_user.first_name+"</a>"
+    start = msg.find("amzn.to")
+    if start!=-1:
+        msg = unshortURL(msg[start:].split()[0])
+    start = msg.find("amzn.eu")
+    if start!=-1:
+        msg = unshortURL(msg[start:].split()[0])
+    start = msg.find(searchURL)
+    if start != -1:
+        #Regular expression to extract the product code. Adjust if different URL schemes are found.
+        m = re.search(r'(?:dp\/[\w]*)|(?:gp\/product\/[\w]*)|(?:gp\/aw\/d\/[\w]*)',msg[start:].split(" ")[0])
         if m != None:
-            logger.info(f"Filtered link: {msg} -> {new_url}")  
+            pCode = m.group(0)
+#        reflong = newReferURL(pCode)
+#        bitly = json.loads(requests.get("http://api.bit.ly/shorten?version=2.0.1&longUrl="+urllib.parse.quote(reflong, safe='')+"&login=ghir0&apiKey=R_c7d78316d223d5a1d7827d58d80e76be&format=json").text)
+#        refshort = bitly["results"][reflong]['shortUrl']
+#        link = "<a href=\""+reflong+"\">"+str(refshort)+"</a>"
+        link = "<a href=\""+newReferURL(pCode)+"\">"+baseURL+pCode+"</a>"
+        context.bot.send_message(chat_id=update.message.chat_id,reply_to_message_id=update.message.message_id, text="🔥 Aporte de  <b>"+sender+"</b> \n\n➡️ "+link,parse_mode='HTML')
+        context.bot.delete_message(chat_id=update.message.chat_id,message_id=update.message.message_id)
+    start = msg.find("aliexpress")
+    if start!=-1:
+        e = re.search(r'(?:\/e\/[\w]*)',msg[start:].split(" ")[0])
+        a = re.search(r'(?:com\/_[\w]*)',msg[start:].split(" ")[0])
+        i = re.search(r'(?:com\/item\/[\w]*)',msg[start:].split(" ")[0])
+        if e != None:
+            pCode = e.group(0)
+            msg = "https://s.click.aliexpress.com"+pCode
         else:
-            logger.warning(f"Product code not found: {msg} -> {new_url}")
-            if DEV_CHAT_ID != None and msg != base_url:
-                await context.bot.sendMessage(chat_id=DEV_CHAT_ID, text=f'Product code not found! Original URL: {msg} ')
+            if a != None:
+                pCode = a.group(0)
+                msg = "https://a.aliexpress."+pCode
+            else:
+                pCode = i.group(0)
+                msg = "https://es.aliexpress."+pCode+".html"
+        alilink = aliexpress.get_affiliate_links(msg)
+        alitest = str(alilink)
+        start = alitest.find("promotion_link")
+        if start!=-1:
+            context.bot.send_message(chat_id=update.message.chat_id,reply_to_message_id=update.message.message_id, text="🔥 Aporte de  <b>"+sender+"</b> \n\n➡️ "+alilink[0].promotion_link,parse_mode='HTML')
+            context.bot.delete_message(chat_id=update.message.chat_id,message_id=update.message.message_id)
 
-        await context.bot.sendMessage(chat_id=update.message.chat_id, reply_to_message_id=update.effective_message.id, text=new_url)
-    else:
-        logger.warning(f'URL not filtered: {msg}')
 
 def main():
     """Start the bot."""
-    # Create the Application and pass it your bot's token.
-    application = Application.builder().token(TOKEN).build()
+    # Create the Updater and pass it your bot's token.
+    updater = Updater(TOKEN, use_context=True)
 
-    # Welcome message handler
-    application.add_handler(CommandHandler("start", start))
+    # Get the dispatcher to register handlers
+    dp = updater.dispatcher
 
-    # URL - LINK message handler -- Process URLs
-    application.add_handler(MessageHandler(filters.TEXT & (filters.Entity(MessageEntity.URL) | filters.Entity(MessageEntity.TEXT_LINK)), filterText))
+    # on different commands - answer in Telegram
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(MessageHandler(    
+                   Filters.text & (Filters.entity(MessageEntity.URL) |
+                                    Filters.entity(MessageEntity.TEXT_LINK)),filterText))
+    # Start the Bot
+    updater.start_webhook(listen="0.0.0.0",
+                          port=int(PORT),
+                          url_path=TOKEN)
+    updater.bot.setWebhook(HEROKU_URL + TOKEN)
 
-    # Run the bot until the user presses Ctrl-C
-    application.run_polling(allowed_updates=Update.ALL_TYPES, poll_interval=10, timeout=1)
+    # Run the bot until you press Ctrl-C or the process receives SIGINT,
+    # SIGTERM or SIGABRT. This should be used most of the time, since
+    # start_polling() is non-blocking and will stop the bot gracefully.
+    updater.idle()
 
 if __name__ == '__main__':
     main()
