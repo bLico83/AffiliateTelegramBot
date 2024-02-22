@@ -5,6 +5,7 @@ import logging
 from telegram.ext import CommandHandler
 from telegram.ext import MessageHandler, Filters
 from telegram import MessageEntity
+from amazon_paapi import AmazonApi
 import re
 import requests
 import os
@@ -21,6 +22,10 @@ TOKEN = os.environ['TOKEN']
 baseURL = os.environ['baseURL'] 
 affiliate_tag = os.environ['affiliate_tag']
 HEROKU_URL = os.environ['HEROKU_URL']
+AKEY = os.environ['AKEY']
+ASECRET = os.environ['ASECRET']
+
+amazon = AmazonApi(AKEY, ASECRET, affiliate_tag, "ES", throttling=2) 
 
 # baseURL should have https and www before amazon, but we also want to detect URL without it
 # Ensure that we can detect all but the baseURL has the correct https URL
@@ -64,7 +69,8 @@ def filterText(update, context):
         m = re.search(r'(?:dp\/[\w]*)|(?:gp\/product\/[\w]*)',msg[start:].split(" ")[0])
         if m != None:
             pCode = m.group(0)
-        context.bot.send_message(chat_id=update.message.chat_id,reply_to_message_id=update.message.message_id, text=newReferURL(pCode))
+        item = amazon.get_items(baseURL+pCode)
+        context.bot.send_message(chat_id=update.message.chat_id,reply_to_message_id=update.message.message_id, text=newReferURL(pCode)+" Hola"+item.item_info.title.display_value)
 
 def main():
     """Start the bot."""
